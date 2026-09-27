@@ -15,6 +15,7 @@ pipeline {
         PRODUCTION_URL = 'http://127.0.0.1:3002'
         PROMETHEUS_URL = 'http://127.0.0.1:9090'
         REPORTS_DIR = 'reports'
+        DOCKER_HOST = "unix://${HOME}/.colima/default/docker.sock"
     }
 
     stages {
@@ -125,12 +126,20 @@ pipeline {
             steps {
                 sh '''
                     set -e
-                    echo "=== Deploy: push image to staging (Docker Compose) ==="
+                    echo "=== Deploy: push image to staging ==="
                     IMAGE_TAG=$(cat artefacts/IMAGE_TAG.txt)
-                    export IMAGE_TAG
-                    export APP_VERSION
                     docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:staging"
-                    docker compose up -d --no-deps --force-recreate taskflow-staging
+                    if docker compose version >/dev/null 2>&1; then
+                      IMAGE_TAG=staging APP_VERSION="$APP_VERSION" docker compose up -d --no-deps --force-recreate taskflow-staging
+                    elif command -v docker-compose >/dev/null 2>&1; then
+                      IMAGE_TAG=staging APP_VERSION="$APP_VERSION" docker-compose up -d --no-deps --force-recreate taskflow-staging
+                    else
+                      docker network create taskflow-net 2>/dev/null || true
+                      docker rm -f taskflow-staging 2>/dev/null || true
+                      docker run -d --name taskflow-staging --network taskflow-net \
+                        -p 3001:3000 -e NODE_ENV=staging -e APP_VERSION="$APP_VERSION" -e PORT=3000 \
+                        "${IMAGE_NAME}:staging"
+                    fi
                     echo "Waiting for staging health..."
                     for i in 1 2 3 4 5 6 7 8 9 10; do
                       if curl -sf "${STAGING_URL}/health" >/dev/null; then
@@ -141,7 +150,7 @@ pipeline {
                       sleep 3
                     done
                     echo "Staging health check failed"
-                    docker compose logs --no-color taskflow-staging | tail -n 80 || true
+                    docker logs taskflow-staging 2>&1 | tail -n 80 || true
                     exit 1
                 '''
             }
@@ -156,9 +165,17 @@ pipeline {
                     RELEASE_TAG="v${APP_VERSION}.${BUILD_NUMBER}"
                     docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:production"
                     docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:${RELEASE_TAG}"
-                    export IMAGE_TAG=production
-                    export APP_VERSION
-                    docker compose --profile production up -d --no-deps --force-recreate taskflow-production
+                    if docker compose version >/dev/null 2>&1; then
+                      IMAGE_TAG=production APP_VERSION="$APP_VERSION" docker compose --profile production up -d --no-deps --force-recreate taskflow-production
+                    elif command -v docker-compose >/dev/null 2>&1; then
+                      IMAGE_TAG=production APP_VERSION="$APP_VERSION" docker-compose --profile production up -d --no-deps --force-recreate taskflow-production
+                    else
+                      docker network create taskflow-net 2>/dev/null || true
+                      docker rm -f taskflow-production 2>/dev/null || true
+                      docker run -d --name taskflow-production --network taskflow-net \
+                        -p 3002:3000 -e NODE_ENV=production -e APP_VERSION="$APP_VERSION" -e PORT=3000 \
+                        "${IMAGE_NAME}:production"
+                    fi
                     echo "${RELEASE_TAG}" > artefacts/RELEASE_TAG.txt
                     echo "Waiting for production health..."
                     for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -171,7 +188,7 @@ pipeline {
                       sleep 3
                     done
                     echo "Production health check failed"
-                    docker compose --profile production logs --no-color taskflow-production | tail -n 80 || true
+                    docker logs taskflow-production 2>&1 | tail -n 80 || true
                     exit 1
                 '''
             }
@@ -187,7 +204,24 @@ pipeline {
                 sh '''
                     set -e
                     echo "=== Monitoring: Prometheus + Alertmanager + live metrics check ==="
-                    docker compose --profile monitoring up -d prometheus alertmanager
+                    if docker compose version >/dev/null 2>&1; then
+                      docker compose --profile monitoring up -d prometheus alertmanager
+                    elif command -v docker-compose >/dev/null 2>&1; then
+                      docker-compose --profile monitoring up -d prometheus alertmanager
+                    else
+                      docker network create taskflow-net 2>/dev/null || true
+                      docker rm -f taskflow-prometheus taskflow-alertmanager 2>/dev/null || true
+                      docker run -d --name taskflow-prometheus --network taskflow-net \
+                        -p 9090:9090 \
+                        -v "$PWD/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+                        -v "$PWD/monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro" \
+                        prom/prometheus:v2.54.1 \
+                        --config.file=/etc/prometheus/prometheus.yml --web.enable-lifecycle
+                      docker run -d --name taskflow-alertmanager --network taskflow-net \
+                        -p 9093:9093 \
+                        -v "$PWD/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
+                        prom/alertmanager:v0.27.0
+                    fi
                     sleep 5
 
                     echo "Production /metrics sample:"
@@ -232,7 +266,7 @@ EOF
             echo "Pipeline FAILED — check the stage console output and archived reports/"
         }
         always {
-            sh 'docker compose ps || true'
+            sh 'docker ps --filter name=taskflow --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" || true'
         }
     }
 }
