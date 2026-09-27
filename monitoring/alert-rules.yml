@@ -1,0 +1,23 @@
+groups:
+  - name: taskflow
+    rules:
+      - alert: TaskFlowDown
+        expr: up{job=~"taskflow-.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TaskFlow target is down"
+          description: "Prometheus cannot scrape {{ $labels.job }} for more than 1 minute."
+
+      - alert: TaskFlowHighErrorRate
+        expr: |
+          sum(rate(taskflow_http_request_duration_seconds_count{status_code=~"5.."}[2m]))
+          /
+          sum(rate(taskflow_http_request_duration_seconds_count[2m])) > 0.2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated 5xx rate on TaskFlow"
+          description: "More than 20% of recent requests returned 5xx."

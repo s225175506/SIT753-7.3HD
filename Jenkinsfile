@@ -1,0 +1,238 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+    }
+
+    environment {
+        APP_NAME = 'taskflow-api'
+        APP_VERSION = '1.0.0'
+        IMAGE_NAME = 'taskflow-api'
+        STAGING_URL = 'http://127.0.0.1:3001'
+        PRODUCTION_URL = 'http://127.0.0.1:3002'
+        PROMETHEUS_URL = 'http://127.0.0.1:9090'
+        REPORTS_DIR = 'reports'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh '''
+                    mkdir -p "$REPORTS_DIR" dist artefacts
+                    echo "Checked out TaskFlow for build ${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=== Build: install deps, compile artefact, build Docker image ==="
+                    npm ci
+                    export BUILD_NUMBER="${BUILD_NUMBER}"
+                    export APP_VERSION="${APP_VERSION}"
+                    npm run build
+                    IMAGE_TAG="build-${BUILD_NUMBER}"
+                    docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" -t "${IMAGE_NAME}:staging" .
+                    docker save "${IMAGE_NAME}:${IMAGE_TAG}" | gzip > "artefacts/${IMAGE_NAME}-${IMAGE_TAG}.tar.gz"
+                    echo "${IMAGE_TAG}" > artefacts/IMAGE_TAG.txt
+                    cp dist/build-manifest.json "$REPORTS_DIR"/build-manifest.json
+                    echo "Build artefact: artefacts/${IMAGE_NAME}-${IMAGE_TAG}.tar.gz"
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'dist/**,artefacts/**', fingerprint: true, allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=== Test: Jest unit + API integration tests ==="
+                    npm test
+                    if [ -d coverage ]; then
+                      cp -R coverage "$REPORTS_DIR"/coverage || true
+                    fi
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/coverage/**,coverage/**', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Code Quality') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=== Code Quality: ESLint + quality gate report ==="
+                    npm run quality
+                    echo "Quality stage focuses on style, duplication signals, and maintainability — not CVE scanning."
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/code-quality.*', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Security') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=== Security: npm audit (dependencies) + Trivy image scan ==="
+                    mkdir -p "$REPORTS_DIR"
+                    set +e
+                    npm audit --json > "$REPORTS_DIR"/npm-audit.json
+                    AUDIT_EXIT=$?
+                    set -e
+                    node scripts/security-report.js "$REPORTS_DIR"/npm-audit.json "$REPORTS_DIR"/security-summary.md
+
+                    IMAGE_TAG=$(cat artefacts/IMAGE_TAG.txt)
+                    if command -v trivy >/dev/null 2>&1; then
+                      trivy image --severity HIGH,CRITICAL --format table --output "$REPORTS_DIR"/trivy.txt "${IMAGE_NAME}:${IMAGE_TAG}" || true
+                      trivy image --severity HIGH,CRITICAL --exit-code 0 --format json --output "$REPORTS_DIR"/trivy.json "${IMAGE_NAME}:${IMAGE_TAG}" || true
+                    else
+                      echo "Trivy CLI not found — running npm audit only. Install: brew install trivy" | tee "$REPORTS_DIR"/trivy.txt
+                    fi
+                    echo "Security reports written under reports/"
+                    # Fail only on critical direct dependency issues if security-report says FAIL
+                    if grep -q "GATE: FAIL" "$REPORTS_DIR"/security-summary.md; then
+                      echo "Critical vulnerabilities remain unresolved — see security-summary.md"
+                      exit 1
+                    fi
+                    exit 0
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/npm-audit.json,reports/security-summary.md,reports/trivy.*', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=== Deploy: push image to staging (Docker Compose) ==="
+                    IMAGE_TAG=$(cat artefacts/IMAGE_TAG.txt)
+                    export IMAGE_TAG
+                    export APP_VERSION
+                    docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:staging"
+                    docker compose up -d --no-deps --force-recreate taskflow-staging
+                    echo "Waiting for staging health..."
+                    for i in 1 2 3 4 5 6 7 8 9 10; do
+                      if curl -sf "${STAGING_URL}/health" >/dev/null; then
+                        curl -sf "${STAGING_URL}/health" | tee "$REPORTS_DIR"/staging-health.json
+                        echo
+                        exit 0
+                      fi
+                      sleep 3
+                    done
+                    echo "Staging health check failed"
+                    docker compose logs --no-color taskflow-staging | tail -n 80 || true
+                    exit 1
+                '''
+            }
+        }
+
+        stage('Release') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=== Release: promote same artefact to production ==="
+                    IMAGE_TAG=$(cat artefacts/IMAGE_TAG.txt)
+                    RELEASE_TAG="v${APP_VERSION}.${BUILD_NUMBER}"
+                    docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:production"
+                    docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:${RELEASE_TAG}"
+                    export IMAGE_TAG=production
+                    export APP_VERSION
+                    docker compose --profile production up -d --no-deps --force-recreate taskflow-production
+                    echo "${RELEASE_TAG}" > artefacts/RELEASE_TAG.txt
+                    echo "Waiting for production health..."
+                    for i in 1 2 3 4 5 6 7 8 9 10; do
+                      if curl -sf "${PRODUCTION_URL}/health" >/dev/null; then
+                        curl -sf "${PRODUCTION_URL}/health" | tee "$REPORTS_DIR"/production-health.json
+                        echo
+                        echo "Released ${RELEASE_TAG}"
+                        exit 0
+                      fi
+                      sleep 3
+                    done
+                    echo "Production health check failed"
+                    docker compose --profile production logs --no-color taskflow-production | tail -n 80 || true
+                    exit 1
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'artefacts/RELEASE_TAG.txt,reports/production-health.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Monitoring') {
+            steps {
+                sh '''
+                    set -e
+                    echo "=== Monitoring: Prometheus + Alertmanager + live metrics check ==="
+                    docker compose --profile monitoring up -d prometheus alertmanager
+                    sleep 5
+
+                    echo "Production /metrics sample:"
+                    curl -sf "${PRODUCTION_URL}/metrics" | head -n 40 | tee "$REPORTS_DIR"/metrics-sample.txt
+
+                    echo "Prometheus targets:"
+                    curl -sf "${PROMETHEUS_URL}/api/v1/targets" | tee "$REPORTS_DIR"/prometheus-targets.json || true
+                    echo
+
+                    echo "Simulating incident: stop production briefly to exercise alert path..."
+                    docker stop taskflow-production || true
+                    sleep 8
+                    curl -sf "${PRODUCTION_URL}/health" && echo "unexpectedly healthy" || echo "Production unreachable as expected during simulation" | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    docker start taskflow-production
+                    sleep 5
+                    curl -sf "${PRODUCTION_URL}/health" | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    echo
+                    echo "Alertmanager UI: http://127.0.0.1:9093"
+                    echo "Prometheus UI:   http://127.0.0.1:9090"
+                    cat > "$REPORTS_DIR"/monitoring-notes.md << 'EOF'
+# Monitoring notes
+- Prometheus scrapes staging (:3001) and production (:3002) `/metrics` endpoints.
+- Alert rules: TaskFlowDown (target up == 0), TaskFlowHighErrorRate (5xx ratio).
+- Incident simulation stops the production container briefly, confirms failure, then restarts it.
+- Alertmanager receives alerts on :9093 (webhook receiver configured for demo).
+EOF
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/metrics-sample.txt,reports/prometheus-targets.json,reports/incident-simulation.txt,reports/monitoring-notes.md', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Pipeline finished SUCCESS — all seven stages completed for build ${BUILD_NUMBER}"
+        }
+        failure {
+            echo "Pipeline FAILED — check the stage console output and archived reports/"
+        }
+        always {
+            sh 'docker compose ps || true'
+        }
+    }
+}
