@@ -130,13 +130,13 @@ pipeline {
                     echo "=== Deploy: push image to staging ==="
                     IMAGE_TAG=$(cat artefacts/IMAGE_TAG.txt)
                     docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:staging"
+                    docker rm -f taskflow-staging 2>/dev/null || true
                     if docker compose version >/dev/null 2>&1; then
                       IMAGE_TAG=staging APP_VERSION="$APP_VERSION" docker compose up -d --no-deps --force-recreate taskflow-staging
                     elif command -v docker-compose >/dev/null 2>&1; then
                       IMAGE_TAG=staging APP_VERSION="$APP_VERSION" docker-compose up -d --no-deps --force-recreate taskflow-staging
                     else
                       docker network create taskflow-net 2>/dev/null || true
-                      docker rm -f taskflow-staging 2>/dev/null || true
                       docker run -d --name taskflow-staging --network taskflow-net \
                         -p 3001:3000 -e NODE_ENV=staging -e APP_VERSION="$APP_VERSION" -e PORT=3000 \
                         "${IMAGE_NAME}:staging"
@@ -166,13 +166,13 @@ pipeline {
                     RELEASE_TAG="v${APP_VERSION}.${BUILD_NUMBER}"
                     docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:production"
                     docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${IMAGE_NAME}:${RELEASE_TAG}"
+                    docker rm -f taskflow-production 2>/dev/null || true
                     if docker compose version >/dev/null 2>&1; then
                       IMAGE_TAG=production APP_VERSION="$APP_VERSION" docker compose --profile production up -d --no-deps --force-recreate taskflow-production
                     elif command -v docker-compose >/dev/null 2>&1; then
                       IMAGE_TAG=production APP_VERSION="$APP_VERSION" docker-compose --profile production up -d --no-deps --force-recreate taskflow-production
                     else
                       docker network create taskflow-net 2>/dev/null || true
-                      docker rm -f taskflow-production 2>/dev/null || true
                       docker run -d --name taskflow-production --network taskflow-net \
                         -p 3002:3000 -e NODE_ENV=production -e APP_VERSION="$APP_VERSION" -e PORT=3000 \
                         "${IMAGE_NAME}:production"
