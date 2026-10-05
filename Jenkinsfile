@@ -235,10 +235,13 @@ pipeline {
                     curl -sf "${PROMETHEUS_URL}/api/v1/targets" | tee "$REPORTS_DIR"/prometheus-targets.json || true
                     echo
 
-                    echo "Simulating incident: stop production briefly to exercise alert path..."
+                    echo "Simulating incident: stop production long enough for TaskFlowDown (for: 15s) to fire..."
                     docker stop taskflow-production || true
-                    sleep 8
-                    curl -sf "${PRODUCTION_URL}/health" && echo "unexpectedly healthy" || echo "Production unreachable as expected during simulation" | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    sleep 45
+                    curl -sf "${PRODUCTION_URL}/health" && echo "unexpectedly healthy" || echo "Production unreachable as expected during simulation" | tee "$REPORTS_DIR"/incident-simulation.txt
+                    echo "Alertmanager alerts while production is down:"
+                    curl -sf "http://127.0.0.1:9093/api/v1/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts.json || true
+                    echo
                     docker start taskflow-production
                     sleep 5
                     curl -sf "${PRODUCTION_URL}/health" | tee -a "$REPORTS_DIR"/incident-simulation.txt
@@ -248,15 +251,15 @@ pipeline {
                     cat > "$REPORTS_DIR"/monitoring-notes.md << 'EOF'
 # Monitoring notes
 - Prometheus scrapes staging (:3001) and production (:3002) `/metrics` endpoints.
-- Alert rules: TaskFlowDown (target up == 0), TaskFlowHighErrorRate (5xx ratio).
-- Incident simulation stops the production container briefly, confirms failure, then restarts it.
+- Alert rules: TaskFlowDown (target up == 0 for 15s), TaskFlowHighErrorRate (5xx ratio).
+- Incident simulation stops production ~45s, archives Alertmanager alerts while down, then restarts.
 - Alertmanager receives alerts on :9093 (webhook receiver configured for demo).
 EOF
                 '''
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'reports/metrics-sample.txt,reports/prometheus-targets.json,reports/incident-simulation.txt,reports/monitoring-notes.md', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'reports/metrics-sample.txt,reports/prometheus-targets.json,reports/incident-simulation.txt,reports/alertmanager-alerts.json,reports/monitoring-notes.md', allowEmptyArchive: true
                 }
             }
         }

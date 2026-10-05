@@ -3,12 +3,12 @@ groups:
     rules:
       - alert: TaskFlowDown
         expr: up{job=~"taskflow-.*"} == 0
-        for: 1m
+        for: 15s
         labels:
           severity: critical
         annotations:
           summary: "TaskFlow target is down"
-          description: "Prometheus cannot scrape {{ $labels.job }} for more than 1 minute."
+          description: "Prometheus cannot scrape {{ $labels.job }} for more than 15 seconds."
 
       - alert: TaskFlowHighErrorRate
         expr: |
