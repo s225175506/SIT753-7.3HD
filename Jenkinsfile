@@ -205,13 +205,16 @@ pipeline {
                 sh '''
                     set -e
                     echo "=== Monitoring: Prometheus + Alertmanager + live metrics check ==="
+                    docker rm -f taskflow-prometheus taskflow-alertmanager 2>/dev/null || true
+                    # Free host ports if a leftover stack (e.g. SteadyRx) still holds them
+                    docker ps -q --filter publish=9090 | while read id; do docker rm -f "$id"; done
+                    docker ps -q --filter publish=9093 | while read id; do docker rm -f "$id"; done
                     if docker compose version >/dev/null 2>&1; then
                       docker compose --profile monitoring up -d prometheus alertmanager
                     elif command -v docker-compose >/dev/null 2>&1; then
                       docker-compose --profile monitoring up -d prometheus alertmanager
                     else
                       docker network create taskflow-net 2>/dev/null || true
-                      docker rm -f taskflow-prometheus taskflow-alertmanager 2>/dev/null || true
                       docker run -d --name taskflow-prometheus --network taskflow-net \
                         -p 9090:9090 \
                         -v "$PWD/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
