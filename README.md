@@ -11,7 +11,7 @@ Build → Test → Code Quality → Security → Deploy → Release → Monitori
 - ESLint (code quality gate)
 - npm audit + Trivy (security)
 - Docker Compose (staging + production)
-- Prometheus + Alertmanager (monitoring)
+- Prometheus + Alertmanager + Grafana (monitoring / analytics)
 
 ## Quick start (local)
 

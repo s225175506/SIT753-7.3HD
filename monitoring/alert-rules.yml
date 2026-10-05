@@ -10,12 +10,23 @@ groups:
           summary: "TaskFlow target is down"
           description: "Prometheus cannot scrape {{ $labels.job }} for more than 15 seconds."
 
+      - alert: TaskFlowInvalidLoginSpike
+        expr: increase(taskflow_login_attempts_total{result="failure"}[1m]) >= 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spike of invalid TaskFlow logins"
+          description: "At least 5 failed login attempts in the last minute on {{ $labels.job }}."
+
       - alert: TaskFlowHighErrorRate
         expr: |
-          sum(rate(taskflow_http_request_duration_seconds_count{status_code=~"5.."}[2m]))
-          /
-          sum(rate(taskflow_http_request_duration_seconds_count[2m])) > 0.2
-        for: 2m
+          (
+            sum(rate(taskflow_http_requests_total{status_code=~"5.."}[2m]))
+            /
+            clamp_min(sum(rate(taskflow_http_requests_total[2m])), 0.001)
+          ) > 0.2
+        for: 1m
         labels:
           severity: warning
         annotations:

@@ -38,6 +38,9 @@ function createTaskRouter(store, metrics) {
       if (!task) {
         return res.status(404).json({ error: 'Task not found' });
       }
+      if (metrics && metrics.tasksUpdated) {
+        metrics.tasksUpdated.inc();
+      }
       return res.json(task);
     } catch (err) {
       return next(err);
@@ -48,6 +51,9 @@ function createTaskRouter(store, metrics) {
     const deleted = store.deleteTask(req.userId, req.params.id);
     if (!deleted) {
       return res.status(404).json({ error: 'Task not found' });
+    }
+    if (metrics && metrics.tasksDeleted) {
+      metrics.tasksDeleted.inc();
     }
     return res.status(204).send();
   });

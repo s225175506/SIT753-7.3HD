@@ -1,6 +1,6 @@
 const express = require('express');
 
-function createAuthRouter(store) {
+function createAuthRouter(store, metrics) {
   const router = express.Router();
 
   router.post('/register', (req, res, next) => {
@@ -20,7 +20,13 @@ function createAuthRouter(store) {
     const { username, password } = req.body || {};
     const user = store.authenticate(username, password);
     if (!user) {
+      if (metrics && metrics.loginAttempts) {
+        metrics.loginAttempts.inc({ result: 'failure' });
+      }
       return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (metrics && metrics.loginAttempts) {
+      metrics.loginAttempts.inc({ result: 'success' });
     }
     return res.json(user);
   });
@@ -28,7 +34,7 @@ function createAuthRouter(store) {
   return router;
 }
 
-function requireApiKey(store) {
+function requireApiKey(store, metrics) {
   return (req, res, next) => {
     const header = req.headers['x-api-key'] || req.headers.authorization;
     let key = header;
@@ -37,6 +43,9 @@ function requireApiKey(store) {
     }
     const userId = store.userIdFromApiKey(key);
     if (!userId) {
+      if (metrics && metrics.apiKeyAuthFailures) {
+        metrics.apiKeyAuthFailures.inc();
+      }
       return res.status(401).json({ error: 'Missing or invalid API key' });
     }
     req.userId = userId;

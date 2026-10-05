@@ -27,6 +27,16 @@ describe('TaskFlow API', () => {
     expect(res.text).toMatch(/process_cpu|taskflow_/);
   });
 
+  test('failed login increments failure metric', async () => {
+    const bad = await request(app)
+      .post('/auth/login')
+      .send({ username: 'demo', password: 'wrong-password' });
+    expect(bad.status).toBe(401);
+
+    const metrics = await request(app).get('/metrics');
+    expect(metrics.text).toMatch(/taskflow_login_attempts_total\{result="failure"\}/);
+  });
+
   test('rejects task list without API key', async () => {
     const res = await request(app).get('/api/tasks');
     expect(res.status).toBe(401);

@@ -14,6 +14,8 @@ pipeline {
         STAGING_URL = 'http://127.0.0.1:3001'
         PRODUCTION_URL = 'http://127.0.0.1:3002'
         PROMETHEUS_URL = 'http://127.0.0.1:9090'
+        ALERTMANAGER_URL = 'http://127.0.0.1:9093'
+        GRAFANA_URL = 'http://127.0.0.1:3003'
         REPORTS_DIR = 'reports'
         DOCKER_HOST = "unix://${HOME}/.colima/default/docker.sock"
         PATH = "/opt/homebrew/bin:/usr/local/bin:${env.PATH}"
@@ -204,63 +206,99 @@ pipeline {
             steps {
                 sh '''
                     set -e
-                    echo "=== Monitoring: Prometheus + Alertmanager + live metrics check ==="
-                    docker rm -f taskflow-prometheus taskflow-alertmanager 2>/dev/null || true
-                    # Free host ports if a leftover stack (e.g. SteadyRx) still holds them
+                    echo "=== Monitoring: Prometheus + Alertmanager + Grafana + alert drills ==="
+                    docker rm -f taskflow-prometheus taskflow-alertmanager taskflow-grafana 2>/dev/null || true
                     docker ps -q --filter publish=9090 | while read id; do docker rm -f "$id"; done
                     docker ps -q --filter publish=9093 | while read id; do docker rm -f "$id"; done
+                    docker ps -q --filter publish=3003 | while read id; do docker rm -f "$id"; done
+
                     if docker compose version >/dev/null 2>&1; then
-                      docker compose --profile monitoring up -d prometheus alertmanager
+                      docker compose --profile monitoring up -d prometheus alertmanager grafana
                     elif command -v docker-compose >/dev/null 2>&1; then
-                      docker-compose --profile monitoring up -d prometheus alertmanager
+                      docker-compose --profile monitoring up -d prometheus alertmanager grafana
                     else
                       docker network create taskflow-net 2>/dev/null || true
-                      docker run -d --name taskflow-prometheus --network taskflow-net \
-                        -p 9090:9090 \
-                        -v "$PWD/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-                        -v "$PWD/monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro" \
-                        prom/prometheus:v2.54.1 \
-                        --config.file=/etc/prometheus/prometheus.yml --web.enable-lifecycle
                       docker run -d --name taskflow-alertmanager --network taskflow-net \
                         --network-alias alertmanager \
                         -p 9093:9093 \
                         -v "$PWD/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
                         prom/alertmanager:v0.27.0
+                      docker run -d --name taskflow-prometheus --network taskflow-net \
+                        -p 9090:9090 \
+                        --add-host=host.docker.internal:host-gateway \
+                        -v "$PWD/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+                        -v "$PWD/monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro" \
+                        prom/prometheus:v2.54.1 \
+                        --config.file=/etc/prometheus/prometheus.yml --web.enable-lifecycle
+                      docker run -d --name taskflow-grafana --network taskflow-net \
+                        -p 3003:3000 \
+                        -e GF_SECURITY_ADMIN_USER=admin \
+                        -e GF_SECURITY_ADMIN_PASSWORD=taskflow \
+                        -e GF_AUTH_ANONYMOUS_ENABLED=true \
+                        -e GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer \
+                        -e GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/taskflow-overview.json \
+                        -v "$PWD/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro" \
+                        -v "$PWD/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro" \
+                        grafana/grafana:11.2.0
                     fi
-                    sleep 5
+                    sleep 8
 
                     echo "Production /metrics sample:"
-                    curl -sf "${PRODUCTION_URL}/metrics" | head -n 40 | tee "$REPORTS_DIR"/metrics-sample.txt
+                    curl -sf "${PRODUCTION_URL}/metrics" | head -n 60 | tee "$REPORTS_DIR"/metrics-sample.txt
 
                     echo "Prometheus targets:"
                     curl -sf "${PROMETHEUS_URL}/api/v1/targets" | tee "$REPORTS_DIR"/prometheus-targets.json || true
                     echo
 
-                    echo "Simulating incident: stop production long enough for TaskFlowDown (for: 15s) to fire..."
+                    echo "=== Drill 1: invalid login spike (TaskFlowInvalidLoginSpike) ==="
+                    : > "$REPORTS_DIR"/incident-simulation.txt
+                    for i in 1 2 3 4 5 6 7 8; do
+                      curl -s -o /dev/null -w "login_fail_${i}:%{http_code}\\n" \
+                        -X POST "${PRODUCTION_URL}/auth/login" \
+                        -H 'Content-Type: application/json' \
+                        -d '{"username":"demo","password":"not-the-real-password"}' \
+                        | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    done
+                    # Seed a little analytics traffic for Grafana
+                    curl -sf -X POST "${PRODUCTION_URL}/auth/login" \
+                      -H 'Content-Type: application/json' \
+                      -d '{"username":"demo","password":"demopass"}' >/dev/null || true
+                    sleep 20
+                    echo "Alertmanager after invalid-login drill:" | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    curl -sf "${ALERTMANAGER_URL}/api/v2/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts.json || true
+                    echo | tee -a "$REPORTS_DIR"/incident-simulation.txt
+
+                    echo "=== Drill 2: brief production outage (TaskFlowDown) ==="
                     docker stop taskflow-production || true
-                    sleep 60
-                    curl -sf "${PRODUCTION_URL}/health" && echo "unexpectedly healthy" || echo "Production unreachable as expected during simulation" | tee "$REPORTS_DIR"/incident-simulation.txt
-                    echo "Alertmanager alerts while production is down:"
-                    curl -sf "http://127.0.0.1:9093/api/v2/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts.json || true
+                    sleep 35
+                    curl -sf "${PRODUCTION_URL}/health" && echo "unexpectedly healthy" || echo "Production unreachable as expected during outage drill" | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    curl -sf "${ALERTMANAGER_URL}/api/v2/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts-outage.json || true
                     echo
                     docker start taskflow-production
                     sleep 5
                     curl -sf "${PRODUCTION_URL}/health" | tee -a "$REPORTS_DIR"/incident-simulation.txt
                     echo
-                    echo "Alertmanager UI: http://127.0.0.1:9093"
-                    echo "Prometheus UI:   http://127.0.0.1:9090"
+
+                    curl -sf -o /dev/null -w "grafana_http:%{http_code}\\n" "${GRAFANA_URL}/api/health" | tee -a "$REPORTS_DIR"/incident-simulation.txt || true
+
+                    echo "Grafana UI:      ${GRAFANA_URL}  (TaskFlow Operations dashboard)"
+                    echo "Prometheus UI:   ${PROMETHEUS_URL}"
+                    echo "Alertmanager UI: ${ALERTMANAGER_URL}"
                     cat > "$REPORTS_DIR"/monitoring-notes.md << 'EOF'
 # Monitoring notes
-- Prometheus scrapes staging (:3001) and production (:3002) `/metrics` endpoints via host.docker.internal.
-- Alert rules: TaskFlowDown (target up == 0 for 15s), TaskFlowHighErrorRate (5xx ratio).
-- Incident simulation stops production ~60s, archives Alertmanager alerts while down, then restarts.
-- Alertmanager receives alerts on :9093 (webhook receiver configured for demo).
+- Stack: Prometheus (scrapes :3001/:3002), Alertmanager (:9093), Grafana (:3003) with provisioned TaskFlow Operations dashboard.
+- App metrics: HTTP rate/latency, login success/failure, API-key auth failures, task CRUD counters.
+- Alert rules:
+  - TaskFlowInvalidLoginSpike — ≥5 failed logins in 1 minute
+  - TaskFlowDown — scrape target down for 15s
+  - TaskFlowHighErrorRate — >20% 5xx
+- Incident drills in pipeline: invalid-login spike, then brief production stop/restart.
 EOF
                 '''
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'reports/metrics-sample.txt,reports/prometheus-targets.json,reports/incident-simulation.txt,reports/alertmanager-alerts.json,reports/monitoring-notes.md', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'reports/metrics-sample.txt,reports/prometheus-targets.json,reports/incident-simulation.txt,reports/alertmanager-alerts.json,reports/alertmanager-alerts-outage.json,reports/monitoring-notes.md', allowEmptyArchive: true
                 }
             }
         }
