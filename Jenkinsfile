@@ -16,6 +16,7 @@ pipeline {
         PROMETHEUS_URL = 'http://127.0.0.1:9090'
         REPORTS_DIR = 'reports'
         DOCKER_HOST = "unix://${HOME}/.colima/default/docker.sock"
+        PATH = "/opt/homebrew/bin:/usr/local/bin:${env.PATH}"
     }
 
     stages {
