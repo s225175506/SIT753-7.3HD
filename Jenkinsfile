@@ -222,6 +222,7 @@ pipeline {
                         prom/prometheus:v2.54.1 \
                         --config.file=/etc/prometheus/prometheus.yml --web.enable-lifecycle
                       docker run -d --name taskflow-alertmanager --network taskflow-net \
+                        --network-alias alertmanager \
                         -p 9093:9093 \
                         -v "$PWD/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
                         prom/alertmanager:v0.27.0
@@ -240,7 +241,7 @@ pipeline {
                     sleep 45
                     curl -sf "${PRODUCTION_URL}/health" && echo "unexpectedly healthy" || echo "Production unreachable as expected during simulation" | tee "$REPORTS_DIR"/incident-simulation.txt
                     echo "Alertmanager alerts while production is down:"
-                    curl -sf "http://127.0.0.1:9093/api/v1/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts.json || true
+                    curl -sf "http://127.0.0.1:9093/api/v2/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts.json || true
                     echo
                     docker start taskflow-production
                     sleep 5
