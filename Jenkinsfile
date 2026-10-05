@@ -238,7 +238,7 @@ pipeline {
 
                     echo "Simulating incident: stop production long enough for TaskFlowDown (for: 15s) to fire..."
                     docker stop taskflow-production || true
-                    sleep 45
+                    sleep 60
                     curl -sf "${PRODUCTION_URL}/health" && echo "unexpectedly healthy" || echo "Production unreachable as expected during simulation" | tee "$REPORTS_DIR"/incident-simulation.txt
                     echo "Alertmanager alerts while production is down:"
                     curl -sf "http://127.0.0.1:9093/api/v2/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts.json || true
@@ -251,9 +251,9 @@ pipeline {
                     echo "Prometheus UI:   http://127.0.0.1:9090"
                     cat > "$REPORTS_DIR"/monitoring-notes.md << 'EOF'
 # Monitoring notes
-- Prometheus scrapes staging (:3001) and production (:3002) `/metrics` endpoints.
+- Prometheus scrapes staging (:3001) and production (:3002) `/metrics` endpoints via host.docker.internal.
 - Alert rules: TaskFlowDown (target up == 0 for 15s), TaskFlowHighErrorRate (5xx ratio).
-- Incident simulation stops production ~45s, archives Alertmanager alerts while down, then restarts.
+- Incident simulation stops production ~60s, archives Alertmanager alerts while down, then restarts.
 - Alertmanager receives alerts on :9093 (webhook receiver configured for demo).
 EOF
                 '''
