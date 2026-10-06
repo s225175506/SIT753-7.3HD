@@ -207,41 +207,10 @@ pipeline {
                 sh '''
                     set -e
                     echo "=== Monitoring: Prometheus + Alertmanager + Grafana + alert drills ==="
-                    docker rm -f taskflow-prometheus taskflow-alertmanager taskflow-grafana 2>/dev/null || true
-                    docker ps -q --filter publish=9090 | while read id; do docker rm -f "$id"; done
-                    docker ps -q --filter publish=9093 | while read id; do docker rm -f "$id"; done
-                    docker ps -q --filter publish=3003 | while read id; do docker rm -f "$id"; done
-
-                    if docker compose version >/dev/null 2>&1; then
-                      docker compose --profile monitoring up -d prometheus alertmanager grafana
-                    elif command -v docker-compose >/dev/null 2>&1; then
-                      docker-compose --profile monitoring up -d prometheus alertmanager grafana
-                    else
-                      docker network create taskflow-net 2>/dev/null || true
-                      docker run -d --name taskflow-alertmanager --network taskflow-net \
-                        --network-alias alertmanager \
-                        -p 9093:9093 \
-                        -v "$PWD/monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
-                        prom/alertmanager:v0.27.0
-                      docker run -d --name taskflow-prometheus --network taskflow-net \
-                        -p 9090:9090 \
-                        --add-host=host.docker.internal:host-gateway \
-                        -v "$PWD/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-                        -v "$PWD/monitoring/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro" \
-                        prom/prometheus:v2.54.1 \
-                        --config.file=/etc/prometheus/prometheus.yml --web.enable-lifecycle
-                      docker run -d --name taskflow-grafana --network taskflow-net \
-                        -p 3003:3000 \
-                        -e GF_SECURITY_ADMIN_USER=admin \
-                        -e GF_SECURITY_ADMIN_PASSWORD=taskflow \
-                        -e GF_AUTH_ANONYMOUS_ENABLED=true \
-                        -e GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer \
-                        -e GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/taskflow-overview.json \
-                        -v "$PWD/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro" \
-                        -v "$PWD/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro" \
-                        grafana/grafana:11.2.0
-                    fi
-                    sleep 8
+                    chmod +x scripts/start-monitoring.sh scripts/seed-demo-traffic.sh
+                    # Prefer ~/.taskflow-monitoring mounts (Colima often cannot bind /Users/Shared)
+                    ./scripts/start-monitoring.sh
+                    sleep 5
 
                     echo "Production /metrics sample:"
                     curl -sf "${PRODUCTION_URL}/metrics" | head -n 60 | tee "$REPORTS_DIR"/metrics-sample.txt
@@ -249,6 +218,11 @@ pipeline {
                     echo "Prometheus targets:"
                     curl -sf "${PROMETHEUS_URL}/api/v1/targets" | tee "$REPORTS_DIR"/prometheus-targets.json || true
                     echo
+
+                    echo "=== Seed demo traffic (Grafana analytics before drills) ==="
+                    ./scripts/seed-demo-traffic.sh --url "${PRODUCTION_URL}" --rounds 15 | tee "$REPORTS_DIR"/seed-demo-traffic.txt
+                    # Give Prometheus a couple of scrapes so rate/latency panels populate
+                    sleep 12
 
                     echo "=== Drill 1: invalid login spike (TaskFlowInvalidLoginSpike) ==="
                     : > "$REPORTS_DIR"/incident-simulation.txt
@@ -259,10 +233,6 @@ pipeline {
                         -d '{"username":"demo","password":"not-the-real-password"}' \
                         | tee -a "$REPORTS_DIR"/incident-simulation.txt
                     done
-                    # Seed a little analytics traffic for Grafana
-                    curl -sf -X POST "${PRODUCTION_URL}/auth/login" \
-                      -H 'Content-Type: application/json' \
-                      -d '{"username":"demo","password":"demopass"}' >/dev/null || true
                     sleep 20
                     echo "Alertmanager after invalid-login drill:" | tee -a "$REPORTS_DIR"/incident-simulation.txt
                     curl -sf "${ALERTMANAGER_URL}/api/v2/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts.json || true
@@ -286,19 +256,21 @@ pipeline {
                     echo "Alertmanager UI: ${ALERTMANAGER_URL}"
                     cat > "$REPORTS_DIR"/monitoring-notes.md << 'EOF'
 # Monitoring notes
-- Stack: Prometheus (scrapes :3001/:3002), Alertmanager (:9093), Grafana (:3003) with provisioned TaskFlow Operations dashboard.
-- App metrics: HTTP rate/latency, login success/failure, API-key auth failures, task CRUD counters.
+- Stack: Prometheus (scrapes host.docker.internal:3001/:3002), Alertmanager (:9093), Grafana (:3003).
+- Configs are synced to ~/.taskflow-monitoring before start (Colima-safe mounts).
+- Pipeline seeds successful logins, task CRUD, and steady HTTP traffic *before* alert drills so Grafana is never empty after Monitoring.
 - Alert rules:
-  - TaskFlowInvalidLoginSpike — ≥5 failed logins in 1 minute
+  - TaskFlowInvalidLoginSpike — ≥5 failed logins in 2 minutes
   - TaskFlowDown — scrape target down for 15s
   - TaskFlowHighErrorRate — >20% 5xx
-- Incident drills in pipeline: invalid-login spike, then brief production stop/restart.
+- Incident drills: invalid-login spike, then brief production stop/restart.
+- Seed includes a single warmup failed login so the failure counter exists before the 8× spike (Prometheus increase needs ≥2 scrapes).
 EOF
                 '''
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'reports/metrics-sample.txt,reports/prometheus-targets.json,reports/incident-simulation.txt,reports/alertmanager-alerts.json,reports/alertmanager-alerts-outage.json,reports/monitoring-notes.md', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'reports/metrics-sample.txt,reports/prometheus-targets.json,reports/seed-demo-traffic.txt,reports/incident-simulation.txt,reports/alertmanager-alerts.json,reports/alertmanager-alerts-outage.json,reports/monitoring-notes.md', allowEmptyArchive: true
                 }
             }
         }

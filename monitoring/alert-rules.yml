@@ -11,13 +11,13 @@ groups:
           description: "Prometheus cannot scrape {{ $labels.job }} for more than 15 seconds."
 
       - alert: TaskFlowInvalidLoginSpike
-        expr: increase(taskflow_login_attempts_total{result="failure"}[1m]) >= 5
+        expr: increase(taskflow_login_attempts_total{result="failure"}[2m]) >= 5
         for: 0m
         labels:
           severity: warning
         annotations:
           summary: "Spike of invalid TaskFlow logins"
-          description: "At least 5 failed login attempts in the last minute on {{ $labels.job }}."
+          description: "At least 5 failed login attempts in the last two minutes on {{ $labels.job }}."
 
       - alert: TaskFlowHighErrorRate
         expr: |

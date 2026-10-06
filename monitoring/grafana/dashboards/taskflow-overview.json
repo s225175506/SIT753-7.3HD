@@ -109,7 +109,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
       "targets": [
         {
-          "expr": "sum by (status_code) (rate(taskflow_http_requests_total[1m]))",
+          "expr": "sum by (status_code) (rate(taskflow_http_requests_total[1m])) or vector(0)",
           "legendFormat": "{{status_code}}",
           "refId": "A"
         }
@@ -122,7 +122,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
       "targets": [
         {
-          "expr": "sum by (result) (rate(taskflow_login_attempts_total[1m]))",
+          "expr": "sum by (result) (rate(taskflow_login_attempts_total[1m])) or on() vector(0)",
           "legendFormat": "{{result}}",
           "refId": "A"
         }
@@ -135,7 +135,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(taskflow_http_request_duration_seconds_bucket[2m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(taskflow_http_request_duration_seconds_bucket[2m]))) or vector(0)",
           "legendFormat": "p95",
           "refId": "A"
         }
