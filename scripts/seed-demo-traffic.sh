@@ -2,12 +2,12 @@
 # Seed TaskFlow with demo traffic so Grafana panels and Alertmanager drills have data.
 # Usage:
 #   ./scripts/seed-demo-traffic.sh [--url URL] [--spike] [--rounds N]
-# Defaults: production http://127.0.0.1:3002, 12 steady rounds, no bad-login spike.
+# Defaults: production http://127.0.0.1:3002, 18 steady rounds, no bad-login spike.
 
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:3002}"
-ROUNDS=12
+ROUNDS=18
 SPIKE=0
 API_KEY="tf_demo_key_change_me"
 USER="demo"
@@ -35,7 +35,7 @@ if ! curl -sf --max-time 5 "${BASE_URL}/health" >/dev/null; then
 fi
 
 echo "-- successful logins"
-for i in $(seq 1 4); do
+for i in $(seq 1 6); do
   curl -sS --max-time 5 -o /tmp/taskflow-login.json -w "login_ok_${i}:%{http_code}\n" \
     -X POST "${BASE_URL}/auth/login" \
     -H 'Content-Type: application/json' \
@@ -59,7 +59,7 @@ fi
 
 echo "-- create / update / list tasks"
 TASK_IDS=()
-for title in "Demo: pipeline review" "Demo: Grafana seed" "Demo: release checklist"; do
+for title in "Demo: pipeline review" "Demo: Grafana seed" "Demo: release checklist" "Demo: monitoring panels" "Demo: HD video proof"; do
   RESP=$(curl -sS --max-time 5 -X POST "${BASE_URL}/api/tasks" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: ${API_KEY}" \

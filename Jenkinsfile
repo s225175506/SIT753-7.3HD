@@ -220,25 +220,13 @@ pipeline {
                     echo
 
                     echo "=== Seed demo traffic (Grafana analytics before drills) ==="
-                    ./scripts/seed-demo-traffic.sh --url "${PRODUCTION_URL}" --rounds 15 | tee "$REPORTS_DIR"/seed-demo-traffic.txt
+                    ./scripts/seed-demo-traffic.sh --url "${PRODUCTION_URL}" --rounds 20 | tee "$REPORTS_DIR"/seed-demo-traffic.txt
                     # Give Prometheus a couple of scrapes so rate/latency panels populate
                     sleep 12
 
-                    echo "=== Drill 1: invalid login spike (TaskFlowInvalidLoginSpike) ==="
                     : > "$REPORTS_DIR"/incident-simulation.txt
-                    for i in 1 2 3 4 5 6 7 8; do
-                      curl -s -o /dev/null -w "login_fail_${i}:%{http_code}\\n" \
-                        -X POST "${PRODUCTION_URL}/auth/login" \
-                        -H 'Content-Type: application/json' \
-                        -d '{"username":"demo","password":"not-the-real-password"}' \
-                        | tee -a "$REPORTS_DIR"/incident-simulation.txt
-                    done
-                    sleep 20
-                    echo "Alertmanager after invalid-login drill:" | tee -a "$REPORTS_DIR"/incident-simulation.txt
-                    curl -sf "${ALERTMANAGER_URL}/api/v2/alerts" | tee "$REPORTS_DIR"/alertmanager-alerts.json || true
-                    echo | tee -a "$REPORTS_DIR"/incident-simulation.txt
 
-                    echo "=== Drill 2: brief production outage (TaskFlowDown) ==="
+                    echo "=== Drill 1: brief production outage (TaskFlowDown) then recover ==="
                     docker stop taskflow-production || true
                     sleep 35
                     curl -sf "${PRODUCTION_URL}/health" && echo "unexpectedly healthy" || echo "Production unreachable as expected during outage drill" | tee -a "$REPORTS_DIR"/incident-simulation.txt
@@ -248,6 +236,40 @@ pipeline {
                     sleep 5
                     curl -sf "${PRODUCTION_URL}/health" | tee -a "$REPORTS_DIR"/incident-simulation.txt
                     echo
+                    # Restart resets in-memory counters; warm the failure series before the spike
+                    curl -s -o /dev/null -w "login_warmup_fail:%{http_code}\\n" \
+                      -X POST "${PRODUCTION_URL}/auth/login" \
+                      -H 'Content-Type: application/json' \
+                      -d '{"username":"demo","password":"warmup-not-real"}' \
+                      | tee -a "$REPORTS_DIR"/incident-simulation.txt || true
+                    sleep 8
+
+                    echo "=== Drill 2 (LAST): invalid login spike — leave TaskFlowInvalidLoginSpike firing ==="
+                    for i in 1 2 3 4 5 6 7 8; do
+                      curl -s -o /dev/null -w "login_fail_${i}:%{http_code}\\n" \
+                        -X POST "${PRODUCTION_URL}/auth/login" \
+                        -H 'Content-Type: application/json' \
+                        -d '{"username":"demo","password":"not-the-real-password"}' \
+                        | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    done
+                    # Poll until Alertmanager shows the spike; do NOT wait for it to clear (~2m window)
+                    SPIKE_SEEN=0
+                    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+                      ALERTS=$(curl -sf "${ALERTMANAGER_URL}/api/v2/alerts" || true)
+                      printf '%s\n' "${ALERTS}" > "$REPORTS_DIR"/alertmanager-alerts.json
+                      if printf '%s' "${ALERTS}" | grep -q 'TaskFlowInvalidLoginSpike'; then
+                        SPIKE_SEEN=1
+                        echo "TaskFlowInvalidLoginSpike active in Alertmanager (attempt ${attempt})" | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                        break
+                      fi
+                      sleep 2
+                    done
+                    if [ "${SPIKE_SEEN}" -ne 1 ]; then
+                      echo "WARNING: TaskFlowInvalidLoginSpike not seen within poll window" | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    fi
+                    echo "Alertmanager at end of Monitoring (spike left firing for demo):" | tee -a "$REPORTS_DIR"/incident-simulation.txt
+                    cat "$REPORTS_DIR"/alertmanager-alerts.json | tee -a "$REPORTS_DIR"/incident-simulation.txt || true
+                    echo | tee -a "$REPORTS_DIR"/incident-simulation.txt
 
                     curl -sf -o /dev/null -w "grafana_http:%{http_code}\\n" "${GRAFANA_URL}/api/health" | tee -a "$REPORTS_DIR"/incident-simulation.txt || true
 
@@ -263,8 +285,9 @@ pipeline {
   - TaskFlowInvalidLoginSpike — ≥5 failed logins in 2 minutes
   - TaskFlowDown — scrape target down for 15s
   - TaskFlowHighErrorRate — >20% 5xx
-- Incident drills: invalid-login spike, then brief production stop/restart.
-- Seed includes a single warmup failed login so the failure counter exists before the 8× spike (Prometheus increase needs ≥2 scrapes).
+- Incident drill order: (1) brief production stop/restart for TaskFlowDown, (2) LAST invalid-login spike.
+- Stage ends while TaskFlowInvalidLoginSpike is still firing (~2m increase window) so Alertmanager is populated at pipeline SUCCESS; production remains up.
+- After outage restart, a single warmup failed login recreates the failure series (counters reset on container restart).
 EOF
                 '''
             }
